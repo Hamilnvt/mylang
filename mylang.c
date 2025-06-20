@@ -414,8 +414,8 @@ typedef enum
 {
     OP_NONE,
     OP_PRINT,
-    OP_VAR_DEC,
-    OP_VAR_ASSIGN,
+    OP_GLOB_VAR_DECL,
+    OP_GLOB_VAR_ASSIGN,
     OP_TYPES_COUNT
 } OpType;
 
@@ -434,6 +434,40 @@ typedef struct
     size_t count;
     size_t capacity;
 } Ops;
+
+typedef enum
+{
+    TYPE_INT,
+    TYPES_COUNT
+} VarType;
+
+size_t size_of_type(VarType type)
+{
+    static_assert(TYPES_COUNT == 1, "Cover all types in size_of_type");
+    switch (type)
+    {
+        case TYPE_INT: return 4;
+        default: 
+            error("Unreachable");
+            exit(1);
+    }
+}
+
+typedef struct
+{
+    int offset;  
+    VarType type;
+    char *name;
+} GlobVar;
+
+typedef struct
+{
+    GlobVar *items;
+    size_t count;
+    size_t capacity;
+} GlobalVars;
+GlobalVars global_vars = {0};
+size_t global_vars_total_offset = 0;
 
 typedef struct
 {
@@ -504,6 +538,16 @@ Ops parser_parse(Parser *parser)
                     if (!parser_expect_and_match(parser, TOK_L_PAREN)) {
                         error_expected_token_type(TOK_L_PAREN, parser_get(parser), tok);
                     }
+                    todo("make it take both integer and variable (it will be an expression)");
+                    //if (parser_expect(parser, TOK_INTEGER)) {
+                    //    Token t_int = parser_next(parser);
+                    //    int n = atoi(t_int.text);
+                    //} else if (!parser_expect(parser, TOK_WORD)) {
+                    //    todo();
+                    //} else {
+                    //    error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
+                    //    error_expected_token_type(TOK_WORD, parser_get(parser), tok);
+                    //}
                     if (!parser_expect(parser, TOK_INTEGER)) {
                         error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
                     }
@@ -529,9 +573,15 @@ Ops parser_parse(Parser *parser)
                         error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
                     }
                     op = (Op){
-                        .type = OP_VAR_DEC,
-                        .val_str = strdup(t_var_name.text)
+                        .type = OP_GLOB_VAR_DECL,
+                        .val_uint = global_vars.count
                     };
+                    GlobVar var = (GlobVar){
+                        .type = TYPE_INT,
+                        .offset = -1,
+                        .name = strdup(t_var_name.text)
+                    };
+                    da_push(&global_vars, var);
                     da_push(&ops, op);
                 } else if (parser_expect(parser, TOK_OPERATOR)) {
                     if (!streq(parser_get(parser).text, "=")) { 
@@ -550,7 +600,7 @@ Ops parser_parse(Parser *parser)
                         error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
                     }
                     op = (Op){
-                        .type = OP_VAR_ASSIGN,
+                        .type = OP_GLOB_VAR_ASSIGN,
                         .val_uint = atoi(t_val.text)
                     };
                     da_push(&ops, op);
@@ -648,6 +698,7 @@ int main(int argc, char **argv)
 
     /// Begin Parsing
     time_from_here();
+
     Parser parser = parser_new(tokens);
     Ops ops = parser_parse(&parser);
     time_to_here();
@@ -683,14 +734,18 @@ int main(int argc, char **argv)
                 fprintf(output, "    call print\n");
                 break;
             }
-            case OP_VAR_DEC:
+            case OP_GLOB_VAR_DECL:
             {
-                todo("generate OP_VAR_DEC");
-                exit(1);
+                GlobVar *var;
+                da_get_p(global_vars, op.val_uint, var);
+                size_t size = size_of_type(var->type);
+                var->offset = global_vars_total_offset;
+                global_vars_total_offset += size;
+                fprintf(output, "    sub rsp, %zu\n", size);
             }
-            case OP_VAR_ASSIGN:
+            case OP_GLOB_VAR_ASSIGN:
             {
-                todo("generate OP_VAR_DEC");
+                todo("generate OP_GLOB_VAR_ASSIGN");
                 exit(1);
             }
             case OP_NONE:

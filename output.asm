@@ -36,8 +36,4 @@ print:
 
 entry start
 start:
-    mov rdi, 69
-    call print
-    mov rax, 60
-    mov rdi, 0
-    syscall
+    sub rsp, 4
