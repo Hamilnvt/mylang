@@ -1,6 +1,5 @@
 // TODO:
 // - free dynamic arrays
-// - comments
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +10,28 @@
 #include <sys/wait.h>
 #include <assert.h>
 #include <ctype.h>
+#include <time.h>
+
 #include "../strings/strings.c"
+
+/// Begin Timing
+struct timespec clock_start, clock_finish, clock_delta;
+#define NS_PER_SECOND 1000000000
+
+void time_from_here() { clock_gettime(CLOCK_MONOTONIC, &clock_start); }
+
+void time_to_here()
+{
+    clock_gettime(CLOCK_MONOTONIC, &clock_finish);
+    clock_delta.tv_nsec = clock_finish.tv_nsec - clock_start.tv_nsec;
+    clock_delta.tv_sec  = clock_finish.tv_sec -  clock_start.tv_sec;
+}
+
+void time_print(char *msg)
+{
+    printf("INFO: %s took %d.%.9ld secs\n", msg, (int)clock_delta.tv_sec, clock_delta.tv_nsec);
+}
+/// End Timing
 
 const char *print_definition = ""            \
     "print:\n"                               \
@@ -92,14 +112,12 @@ Location loc_new(char *file_path)
 {
     return (Location){
         .row = 0,
-        .col = -1,
+        .col = 0,
         .file_path = strdup(file_path)
     };
 }
 
-void loc_print(Location loc) {
-    printf("%s:%zu:%zu: ", loc.file_path, loc.row+1, loc.col+1);
-}
+void loc_print(Location loc) { printf("%s:%zu:%zu", loc.file_path, loc.row+1, loc.col+1); }
 
 Location loc_clone(Location loc)
 {
@@ -198,6 +216,7 @@ typedef struct
 typedef struct
 {
     ArrayOfStrings source;
+    char c;
     Location loc;
 } Lexer;
 
@@ -219,102 +238,151 @@ Lexer lex_new(char *file_path)
             s_push(&line, full_source.items[i]);
         }
     }
+
+    printf("\nSource code:\n");
     for (size_t i = 0; i < lexer.source.count; i++) {
-        printf("%zu: ", i);
+        printf("%zu: `", i);
         s_print(lexer.source.items[i]);
-        printf("\n");
+        printf("`\n");
     }
+    printf("\n");
+
     lexer.loc = loc_new(file_path);
     da_free(&full_source);
     return lexer;
 }
 
-bool lex_can_advance(Lexer *lex)
-{
-    return (lex->loc.row < lex->source.count &&
-            lex->loc.col+1 < lex->source.items[lex->loc.row].count);
-}
+bool lex_is_empty(Lexer *lex) { return da_is_empty(lex->source); }
 
-char lex_get(Lexer *lex)
-{
-    if (lex->loc.row < lex->source.count && lex->loc.col < lex->source.items[lex->loc.row].count)
-        return lex->source.items[lex->loc.row].items[lex->loc.col];
-    else return EOF;
-}
+String lex_curr_row(Lexer *lex) { return lex->source.items[lex->loc.row]; }
+size_t lex_curr_row_count(Lexer *lex) { return lex_curr_row(lex).count; }
+char lex_curr_char(Lexer *lex) { return lex_curr_row(lex).items[lex->loc.col]; }
 
-char lex_peek(Lexer *lex)
-{
-    if (lex_can_advance(lex)) return lex->source.items[lex->loc.row].items[lex->loc.col+1];
-    else return EOF;
-}
+bool lex_can_advance_row(Lexer *lex) { return lex->loc.row+1 < lex->source.count; }
+bool lex_can_advance_col(Lexer *lex) { return lex->loc.col+1 < lex_curr_row_count(lex); }
+bool lex_can_advance(Lexer *lex) { return lex_can_advance_row(lex) || lex_can_advance_col(lex); }
 
-bool lex_expect(Lexer *lex, char c) { return lex_peek(lex) == c; }
-
-char lex_advance(Lexer *lex)
+bool lex_advance(Lexer *lex)
 {
-    char c = lex_peek(lex);
-    printf("peek = '%c' (%d)\n", c, c);
-    if (c == '\n') { // TODO: non ci sono piu' newline
-        lex->loc.col = -1;
+    if (!lex_can_advance(lex)) return false;
+    size_t row_len = lex_curr_row_count(lex);
+    if (row_len == 0) {
         lex->loc.row++;
-        return lex_advance(lex);
-    } else if (isblank(c)) {
-        do {
-            lex->loc.row++;
-        } while (isblank(lex_peek(lex)));
-        if (lex_get(lex) == EOF) return EOF;
-        else return lex_advance(lex);
-    } else if (c == '/') {
-        if (lex_expect(lex, '/')) {
-            lex->loc.col = -1;
-            lex->loc.row++;
-            return lex_advance(lex);
-        } else {
-            loc_print(lex->loc);
-            error("Unexpected character '%c'", c);
-            note("To comment put two of them: \"//\".");
-            exit(1);
-        }
     } else {
-        lex->loc.col++;
+        lex->loc.col = (lex->loc.col+1) % row_len;
+        if (lex->loc.col == 0) lex->loc.row++;
     }
-    return c;
+    return true;
 }
 
-Tokens lex_lex(Lexer *lex)
+bool lex_get(Lexer *lex)
+{
+    if (lex->loc.row < lex->source.count && lex->loc.col < lex_curr_row_count(lex)) {
+        lex->c = lex_curr_char(lex);
+        return true;
+    } else if (lex_can_advance(lex)) {
+        lex_advance(lex);
+        return lex_get(lex);
+    } else return false;
+}
+
+bool lex_peek(Lexer *lex)
+{
+    if (!lex_can_advance_col(lex)) return false;
+    lex->c = lex_curr_row(lex).items[lex->loc.col+1];
+    return true;
+}
+
+bool lex_expect(Lexer *lex, char expected)
+{
+    char tmp = lex->c;
+    bool res = false;
+    if (lex_peek(lex) && lex->c == expected) res = true;
+    lex->c = tmp;
+    return res;
+}
+
+bool lex_expect_digit(Lexer *lex)
+{
+    char tmp = lex->c;
+    bool res = false;
+    if (lex_peek(lex) && isdigit(lex->c)) res = true;
+    lex->c = tmp;
+    return res;
+}
+
+bool lex_expect_alpha(Lexer *lex)
+{
+    char tmp = lex->c;
+    bool res = false;
+    if (lex_peek(lex) && isalpha(lex->c)) res = true;
+    lex->c = tmp;
+    return res;
+}
+
+bool lex_expect_alphanum(Lexer *lex)
+{
+    char tmp = lex->c;
+    bool res = false;
+    if (lex_peek(lex) && isalnum(lex->c)) res = true;
+    lex->c = tmp;
+    return res;
+}
+
+bool lex_expect_and_advance(Lexer *lex, char expected)
+{
+    char tmp = lex->c;
+    bool res = false;
+    if (lex_peek(lex) && lex->c == expected) {
+        lex_advance(lex);
+        res = true;
+    } else {
+        lex->c = tmp;
+        res = false;
+    };
+    return res;
+}
+
+Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
 {
     static_assert(TOK_TYPES_COUNT == 7, "Cover all token types in lex_lex");
     Tokens tokens = {0};
+    if (lex_is_empty(lex)) return tokens;
     String word = s_new_empty();
-    char c = lex_advance(lex);
-    if (c == EOF) return tokens;
+    char c;
     do {
+        if (!lex_get(lex)) break;
+        c = lex->c;
+        if (isblank(c)) {
+            continue;
+        }
         Token token = (Token){
             .type = TOK_NONE,
             .loc  = loc_clone(lex->loc)
         };
-        if (c == '=') {
-            token.text = "=";
-            token.type = TOK_OPERATOR;
-        } else if (c == '+') {
-            token.text = "+";
-            token.type = TOK_OPERATOR;
-        } else if (c == '(') {
-            token.text = "(";
-            token.type = TOK_L_PAREN;
-        } else if (c == ')') {
-            token.text = ")";
-            token.type = TOK_R_PAREN;
-        } else if (c == ';') {
-            token.text = ";";
-            token.type = TOK_SEMICOLON;
+               if (c == '=') { token.text = "="; token.type = TOK_OPERATOR;
+        } else if (c == '+') { token.text = "+"; token.type = TOK_OPERATOR;
+        } else if (c == '(') { token.text = "("; token.type = TOK_L_PAREN;
+        } else if (c == ')') { token.text = ")"; token.type = TOK_R_PAREN;
+        } else if (c == ';') { token.text = ";"; token.type = TOK_SEMICOLON;
+        } else if (c == '/') {
+            if (lex_expect(lex, '/')) {
+                lex->loc.col = -1; // effectively skip the line after the next lex_advance
+                continue;
+            } else {
+                loc_print(lex->loc);
+                printf(": ");
+                error("Unexpected character '%c'", c);
+                note("To comment put two of them: \"//\".");
+                exit(1);
+            }
         } else if (isdigit(c)) {
             s_push(&word, c);
-            while (lex_can_advance(lex) && isdigit(c = lex_peek(lex))) {
-                s_push(&word, c);
+            while (lex_expect_digit(lex)) {
                 lex_advance(lex);
+                lex_get(lex);
+                s_push(&word, lex->c);
             }
-
             s_push_null(&word);
             token.text = strdup(word.items);
             s_clear(&word);
@@ -322,25 +390,23 @@ Tokens lex_lex(Lexer *lex)
             token.type = TOK_INTEGER;
         } else if (isalpha(c) || c == '_') {
             s_push(&word, c);
-            while (lex_can_advance(lex) && (isdigit(c = lex_peek(lex)) || isalpha(c) || c == '_')) {
-                s_push(&word, c);
+            while (lex_expect_alphanum(lex) || lex_expect(lex, '_')) {
                 lex_advance(lex);
+                lex_get(lex);
+                s_push(&word, lex->c);
             }
-
             s_push_null(&word);
             token.text = strdup(word.items);
             s_clear(&word);
 
             token.type = TOK_WORD;
-        } else if (c == 0 || c == EOF) {
-            break;
         } else {
             todo("lex '%c'", c);
             exit(1);
         }
+
         da_push(&tokens, token);
-    } while ((c = lex_advance(lex)) != EOF);
-    printf("INFO: Lexing took %lf seconds\n", 666.); // TODO
+    } while (lex_advance(lex));
     return tokens;
 }
 
@@ -412,9 +478,11 @@ void error_expected_token_type(TokenType expected, Token victim, Token from)
 {
     if (victim.type == TOK_NONE) {
         loc_print(from.loc);
+        printf(": ");
         error("Expecting `%s`, but got nothing instead.", toktype_to_str(expected));
     } else {
         loc_print(victim.loc);
+        printf(": ");
         error("Expecting `%s`, but got `%s` instead.", toktype_to_str(expected), toktype_to_str(victim.type));
     }
     exit(1);
@@ -468,6 +536,7 @@ Ops parser_parse(Parser *parser)
                 } else if (parser_expect(parser, TOK_OPERATOR)) {
                     if (!streq(parser_get(parser).text, "=")) { 
                         loc_print(parser_get(parser).loc);
+                        printf(": ");
                         error("Expecting operator `=`, but got `%s`.", parser_get(parser).text);
                         exit(1);
                     }
@@ -500,7 +569,6 @@ Ops parser_parse(Parser *parser)
                 todo("parse token type %s.", toktype_to_str(tok.type));
                 exit(1);
         }
-        printf("INFO: Parsing took %lf seconds\n", 666.); // TODO
     }
     return ops;
 }
@@ -561,22 +629,29 @@ int main(int argc, char **argv)
     /// Begin Lexing
     char *file_path = shift_arg(&argc, &argv);
     // TODO: check for file extension
+    time_from_here();
     Lexer lexer = lex_new(file_path);
     Tokens tokens = lex_lex(&lexer);
+    time_to_here();
+    time_print("Lexing");
+    /// End Lexing
 
     printf("\nTokens (%zu):\n", tokens.count);
     Token *t;
     da_foreach(tokens, t) {
         loc_print(t->loc);
+        printf(": ");
         tok_print(*t);
         printf("\n");
     }
     printf("\n");
-    /// End Lexing
 
     /// Begin Parsing
+    time_from_here();
     Parser parser = parser_new(tokens);
     Ops ops = parser_parse(&parser);
+    time_to_here();
+    time_print("Parsing");
     /// End Parsing
 
     /// Begin Generating
@@ -588,6 +663,8 @@ int main(int argc, char **argv)
     }
 
     // TODO: begin file
+    time_from_here();
+
     fprintf(output, "format ELF64 executable 3\n");
     fprintf(output, "segment readable executable\n");
     fprintf(output, "%s\n", print_definition);
@@ -630,7 +707,8 @@ int main(int argc, char **argv)
     fprintf(output, "    syscall\n");
 
     fclose(output);
-    printf("INFO: Generation took %lf seconds\n", 666.); // TODO
+    time_to_here();
+    time_print("Generation");
     /// End Generating
 
     /// Begin Finalizing
