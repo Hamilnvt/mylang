@@ -36,4 +36,16 @@ print:
 
 entry start
 start:
+    push rbp
+    mov rbp, rsp
     sub rsp, 4
+    mov rax, 0
+    mov [rbp-0], rax
+    mov rax, [rbp-0]
+    mov rdi, rax
+    call print
+    mov rsp, rbp
+    pop rbp
+    mov rax, 60
+    mov rdi, 0
+    syscall

@@ -87,6 +87,16 @@ void error(char *format, ...)
     va_start(msg_fmt, format);
     vsprintf(err_buf, format, msg_fmt);
     va_end(msg_fmt);
+    printf("ERROR: %s", err_buf);
+}
+
+void errorln(char *format, ...)
+{
+    char err_buf[1024];
+    va_list msg_fmt; 
+    va_start(msg_fmt, format);
+    vsprintf(err_buf, format, msg_fmt);
+    va_end(msg_fmt);
     printf("ERROR: %s\n", err_buf);
 }
 
@@ -164,13 +174,14 @@ typedef enum
     TOK_L_PAREN,
     TOK_R_PAREN,
     TOK_SEMICOLON,
-    TOK_OPERATOR,
+    TOK_OP_ASSIGN,
+    TOK_OP_PLUS,
     TOK_TYPES_COUNT
 } TokenType;
 
 char *toktype_to_str(TokenType t)
 {
-    static_assert(TOK_TYPES_COUNT == 7 && "Cover all token types in toktype_to_str");
+    static_assert(TOK_TYPES_COUNT == 8 && "Cover all token types in toktype_to_str");
     switch (t)
     {
         case TOK_WORD:      return "Word";
@@ -178,10 +189,11 @@ char *toktype_to_str(TokenType t)
         case TOK_L_PAREN:   return "Lparen";
         case TOK_R_PAREN:   return "Rparen";
         case TOK_SEMICOLON: return "Semicolon";
-        case TOK_OPERATOR:  return "Operator";
+        case TOK_OP_ASSIGN: return "OpAssign";
+        case TOK_OP_PLUS:   return "OpPlus";
         case TOK_NONE:      return "None";
         default:
-            fprintf(stderr, "ERROR: Unknown token type (%d)\n", t);
+            errorln("unknown token type (%d)\n", t);
             exit(1);
     }
 }
@@ -239,13 +251,15 @@ Lexer lex_new(char *file_path)
         }
     }
 
-    printf("\nSource code:\n");
-    for (size_t i = 0; i < lexer.source.count; i++) {
-        printf("%zu: `", i);
-        s_print(lexer.source.items[i]);
-        printf("`\n");
+    if (false) {
+        printf("\nSource code:\n");
+        for (size_t i = 0; i < lexer.source.count; i++) {
+            printf("%zu: `", i);
+            s_print(lexer.source.items[i]);
+            printf("`\n");
+        }
+        printf("\n");
     }
-    printf("\n");
 
     lexer.loc = loc_new(file_path);
     da_free(&full_source);
@@ -345,7 +359,7 @@ bool lex_expect_and_advance(Lexer *lex, char expected)
 
 Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
 {
-    static_assert(TOK_TYPES_COUNT == 7, "Cover all token types in lex_lex");
+    static_assert(TOK_TYPES_COUNT == 8, "Cover all token types in lex_lex");
     Tokens tokens = {0};
     if (lex_is_empty(lex)) return tokens;
     String word = s_new_empty();
@@ -360,8 +374,8 @@ Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
             .type = TOK_NONE,
             .loc  = loc_clone(lex->loc)
         };
-               if (c == '=') { token.text = "="; token.type = TOK_OPERATOR;
-        } else if (c == '+') { token.text = "+"; token.type = TOK_OPERATOR;
+               if (c == '=') { token.text = "="; token.type = TOK_OP_ASSIGN;
+        } else if (c == '+') { token.text = "+"; token.type = TOK_OP_PLUS;
         } else if (c == '(') { token.text = "("; token.type = TOK_L_PAREN;
         } else if (c == ')') { token.text = ")"; token.type = TOK_R_PAREN;
         } else if (c == ';') { token.text = ";"; token.type = TOK_SEMICOLON;
@@ -372,7 +386,7 @@ Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
             } else {
                 loc_print(lex->loc);
                 printf(": ");
-                error("Unexpected character '%c'", c);
+                errorln("Unexpected character '%c'", c);
                 note("To comment put two of them: \"//\".");
                 exit(1);
             }
@@ -414,8 +428,9 @@ typedef enum
 {
     OP_NONE,
     OP_PRINT,
-    OP_GLOB_VAR_DECL,
     OP_GLOB_VAR_ASSIGN,
+    OP_LOAD16,
+    OP_READ_GLOB_VAR,
     OP_TYPES_COUNT
 } OpType;
 
@@ -448,7 +463,7 @@ size_t size_of_type(VarType type)
     {
         case TYPE_INT: return 4;
         default: 
-            error("Unreachable");
+            errorln("Unreachable");
             exit(1);
     }
 }
@@ -458,6 +473,7 @@ typedef struct
     int offset;  
     VarType type;
     char *name;
+    Location loc;
 } GlobVar;
 
 typedef struct
@@ -468,6 +484,16 @@ typedef struct
 } GlobalVars;
 GlobalVars global_vars = {0};
 size_t global_vars_total_offset = 0;
+
+int global_var_index_by_name(char *var_name)
+{
+    int i; 
+    da_for(global_vars, i) {
+        if (streq(var_name, global_vars.items[i].name))
+            return i;
+    }
+    return -1;
+}
 
 typedef struct
 {
@@ -513,12 +539,47 @@ void error_expected_token_type(TokenType expected, Token victim, Token from)
     if (victim.type == TOK_NONE) {
         loc_print(from.loc);
         printf(": ");
-        error("Expecting `%s`, but got nothing instead.", toktype_to_str(expected));
+        errorln("expecting `%s`, but got nothing instead.", toktype_to_str(expected));
     } else {
         loc_print(victim.loc);
         printf(": ");
-        error("Expecting `%s`, but got `%s` instead.", toktype_to_str(expected), toktype_to_str(victim.type));
+        errorln("expecting `%s`, but got `%s` instead.", toktype_to_str(expected), toktype_to_str(victim.type));
     }
+    exit(1);
+}
+
+void error_expected_token_types(TokenType *expected, int n, Token victim, Token from)
+{
+    if (victim.type == TOK_NONE) {
+        loc_print(from.loc);
+        printf(": ");
+        error("expecting ");
+        for (int i = 0; i < n; i ++) {
+            if (i < n-1) printf(", ");
+            else printf(" or ");
+            printf("`%s`", toktype_to_str(expected[i]));
+            printf(", but got nothing instead.\n");
+        }
+    } else {
+        loc_print(victim.loc);
+        printf(": ");
+        error("expecting ");
+        for (int i = 0; i < n; i ++) {
+            if (i < n-1) printf(", ");
+            else printf(" or ");
+            printf("`%s`", toktype_to_str(expected[i]));
+            printf(", but got `%s` instead.\n", toktype_to_str(victim.type));
+        }
+    }
+    exit(1);
+}
+
+void error_undeclared_variable(Token tok, char *msg)
+{
+    loc_print(tok.loc);
+    printf(": ");
+    error(msg);
+    printf(" undeclared variable `%s`.\n", tok.text);
     exit(1);
 }
 
@@ -527,7 +588,7 @@ Ops parser_parse(Parser *parser)
     Ops ops = {0};
     Op op;
     Token tok;
-    static_assert(OP_TYPES_COUNT == 4, "Cover all op types in parser_parse");
+    static_assert(OP_TYPES_COUNT == 5, "Cover all op types in parser_parse");
     while (parser_can_advance(parser)) {
         tok = parser_next(parser);
         switch (tok.type)
@@ -538,60 +599,91 @@ Ops parser_parse(Parser *parser)
                     if (!parser_expect_and_match(parser, TOK_L_PAREN)) {
                         error_expected_token_type(TOK_L_PAREN, parser_get(parser), tok);
                     }
-                    todo("make it take both integer and variable (it will be an expression)");
-                    //if (parser_expect(parser, TOK_INTEGER)) {
-                    //    Token t_int = parser_next(parser);
-                    //    int n = atoi(t_int.text);
-                    //} else if (!parser_expect(parser, TOK_WORD)) {
-                    //    todo();
-                    //} else {
-                    //    error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
-                    //    error_expected_token_type(TOK_WORD, parser_get(parser), tok);
-                    //}
-                    if (!parser_expect(parser, TOK_INTEGER)) {
-                        error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
+                    // TODO: parse expression
+                    if (parser_expect(parser, TOK_INTEGER)) {
+                        Token t_val = parser_next(parser);
+                        op = (Op){
+                            .type = OP_LOAD16,
+                            .val_uint = atoi(t_val.text)
+                        };
+                    } else if (parser_expect(parser, TOK_WORD)) {
+                        Token t_var = parser_next(parser);
+                        int var_i;
+                        if ((var_i = global_var_index_by_name(t_var.text)) == -1) {
+                            error_undeclared_variable(tok, "");
+                        }
+                        op = (Op){
+                            .type = OP_READ_GLOB_VAR,
+                            .val_uint = var_i
+                        };
+                        da_push(&ops, op);
+                    } else {
+                        TokenType types[2] = {TOK_INTEGER, TOK_WORD};
+                        error_expected_token_types(types, 2, parser_get(parser), tok);
                     }
-                    Token t_int = parser_next(parser);
-                    int n = atoi(t_int.text);
                     if (!parser_expect_and_match(parser, TOK_R_PAREN)) {
                         error_expected_token_type(TOK_R_PAREN, parser_get(parser), tok);
                     }
                     if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
                         error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
                     }
-                    op = (Op){
-                        .type = OP_PRINT,
-                        .val_uint = n
-                    };
+                    op = (Op){ .type = OP_PRINT };
                     da_push(&ops, op);
                 } else if (streq(tok.text, "var")) {
                     Token t_var_name = parser_get(parser);
                     if (!parser_expect_and_match(parser, TOK_WORD)) {
                         error_expected_token_type(TOK_WORD, parser_get(parser), tok);
                     }
-                    if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
-                        error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
-                    }
-                    op = (Op){
-                        .type = OP_GLOB_VAR_DECL,
-                        .val_uint = global_vars.count
-                    };
-                    GlobVar var = (GlobVar){
-                        .type = TYPE_INT,
-                        .offset = -1,
-                        .name = strdup(t_var_name.text)
-                    };
-                    da_push(&global_vars, var);
-                    da_push(&ops, op);
-                } else if (parser_expect(parser, TOK_OPERATOR)) {
-                    if (!streq(parser_get(parser).text, "=")) { 
-                        loc_print(parser_get(parser).loc);
+                    int var_i;
+                    if ((var_i = global_var_index_by_name(t_var_name.text)) != -1) {
+                        GlobVar var = global_vars.items[var_i]; 
+                        loc_print(tok.loc);
                         printf(": ");
-                        error("Expecting operator `=`, but got `%s`.", parser_get(parser).text);
+                        errorln("Redeclaration of variable `%s`.", var.name);
+                        loc_print(var.loc);
+                        printf(": ");
+                        note(" Declared here the first time.");
                         exit(1);
                     }
-                    parser_expect_and_match(parser, TOK_OPERATOR);
-                    //da_push_many(parser_parse_expr(parser)); // TODO
+                    var_i = global_vars.count;
+                    GlobVar var = (GlobVar){
+                        .type = TYPE_INT,
+                        .offset = global_vars_total_offset,
+                        .name = strdup(t_var_name.text),
+                        .loc = loc_clone(tok.loc)
+                    };
+                    global_vars_total_offset += size_of_type(var.type);
+                    da_push(&global_vars, var);
+                    if (parser_expect_and_match(parser, TOK_SEMICOLON)) break;
+                    else if (parser_expect_and_match(parser, TOK_OP_ASSIGN)) {
+                        if (!parser_expect(parser, TOK_INTEGER)) { // TODO: per ora
+                            error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
+                        }
+                        Token t_val = parser_next(parser); // TODO: che ci faccio con questo? Lo devo salvare in rax cosi' poi da metterlo nella variabile
+                        if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
+                            error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
+                        }
+                        op = (Op){
+                            .type = OP_LOAD16,
+                            .val_uint = atoi(t_val.text) // TODO: solo per ora, poi non sara' cosi'
+                        };
+                        da_push(&ops, op);
+                        op = (Op){
+                            .type = OP_GLOB_VAR_ASSIGN,
+                            .val_uint = var_i
+                        };
+                        da_push(&ops, op);
+                    } else {
+                        TokenType types[2] = {TOK_SEMICOLON, TOK_OP_ASSIGN};
+                        error_expected_token_types(types, 2, parser_get(parser), tok);
+                    }
+                } else if (parser_expect(parser, TOK_OP_ASSIGN)) {
+                    int var_i;
+                    if ((var_i = global_var_index_by_name(tok.text)) == -1) {
+                        error_undeclared_variable(tok, "trying to assign");
+                    }
+                    parser_next(parser);
+                    //da_push_many(op, parser_parse_expr(parser)); // TODO
                     Token t_val = parser_get(parser);
                     if (!parser_expect_and_match(parser, TOK_INTEGER)) {
                         error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
@@ -599,13 +691,12 @@ Ops parser_parse(Parser *parser)
                     if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
                         error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
                     }
-                    op = (Op){
-                        .type = OP_GLOB_VAR_ASSIGN,
-                        .val_uint = atoi(t_val.text)
-                    };
+                    op = (Op){ .type = OP_LOAD16, .val_uint = atoi(t_val.text) };
+                    da_push(&ops, op);
+                    op = (Op){ .type = OP_GLOB_VAR_ASSIGN, .val_uint = var_i };
                     da_push(&ops, op);
                 } else {
-                    error("unknown WORD `%s`", tok.text);
+                    errorln("unknown WORD `%s`", tok.text);
                     exit(1);
                 }
                 break;
@@ -656,7 +747,7 @@ bool run_cmd(char **cmd, int len)
             exit(EXIT_FAILURE);
         case 0:
             execvp(*cmd, cmd);
-            fprintf(stderr, "ERROR: Could not run cmd\n");
+            fprintf(stderr, "ERROR: could not run cmd\n");
             exit(1);
         default:
             int status;
@@ -686,15 +777,17 @@ int main(int argc, char **argv)
     time_print("Lexing");
     /// End Lexing
 
-    printf("\nTokens (%zu):\n", tokens.count);
-    Token *t;
-    da_foreach(tokens, t) {
-        loc_print(t->loc);
-        printf(": ");
-        tok_print(*t);
+    if (false) {
+        printf("\nTokens (%zu):\n", tokens.count);
+        Token *t;
+        da_foreach(tokens, t) {
+            loc_print(t->loc);
+            printf(": ");
+            tok_print(*t);
+            printf("\n");
+        }
         printf("\n");
     }
-    printf("\n");
 
     /// Begin Parsing
     time_from_here();
@@ -713,7 +806,7 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    // TODO: begin file
+    // TODO: beginning of file
     time_from_here();
 
     fprintf(output, "format ELF64 executable 3\n");
@@ -721,42 +814,49 @@ int main(int argc, char **argv)
     fprintf(output, "%s\n", print_definition);
     fprintf(output, "entry start\n");
     fprintf(output, "start:\n");
+    fprintf(output, "    push rbp\n");
+    fprintf(output, "    mov rbp, rsp\n");
+    fprintf(output, "    sub rsp, %zu\n", 4*global_vars.count); // TODO: for now, all vars are int
 
     int i;
     da_for(ops, i) {
         Op op = ops.items[i];
-        static_assert(OP_TYPES_COUNT == 4, "Cover all op types in code generation");
+        static_assert(OP_TYPES_COUNT == 5, "Cover all op types in code generation");
         switch (op.type)
         {
             case OP_PRINT:
             {
-                fprintf(output, "    mov rdi, %d\n", op.val_uint);
+                fprintf(output, "    mov rdi, rax\n");
                 fprintf(output, "    call print\n");
                 break;
             }
-            case OP_GLOB_VAR_DECL:
+            case OP_LOAD16:
             {
-                GlobVar *var;
-                da_get_p(global_vars, op.val_uint, var);
-                size_t size = size_of_type(var->type);
-                var->offset = global_vars_total_offset;
-                global_vars_total_offset += size;
-                fprintf(output, "    sub rsp, %zu\n", size);
+                fprintf(output, "    mov rax, %d\n", op.val_uint);
+                break;
+            }
+            case OP_READ_GLOB_VAR:
+            {
+                fprintf(output, "    mov rax, [rbp-%d]\n", op.val_uint);
+                break;
             }
             case OP_GLOB_VAR_ASSIGN:
             {
-                todo("generate OP_GLOB_VAR_ASSIGN");
-                exit(1);
+                fprintf(output, "    mov [rbp-%d], rax\n", op.val_uint);
+                break;
             }
             case OP_NONE:
             default:
                 fclose(output);
-                fprintf(stderr, "Unreachable\n");
+                fprintf(stderr, "Unreachable: op type %d\n", op.type);
                 exit(1);
         }
     }
 
     // TODO: end file
+    fprintf(output, "    mov rsp, rbp\n");
+    fprintf(output, "    pop rbp\n");
+
     fprintf(output, "    mov rax, 60\n");
     fprintf(output, "    mov rdi, 0\n");
     fprintf(output, "    syscall\n");

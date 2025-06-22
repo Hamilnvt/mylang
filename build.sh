@@ -1,3 +1,3 @@
 #!/bin/bash
 
-cc -o mylang mylang.c -Wall -Wextra
+cc -o kjude kjude.c -Wall -Wextra
