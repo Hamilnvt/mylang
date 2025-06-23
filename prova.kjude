@@ -3,8 +3,3 @@ print(a);
 a = 69;
 
 var b = 7;
-if true {
-    print(b);
-} else {
-    print(420);
-}

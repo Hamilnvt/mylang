@@ -1,7 +1,7 @@
 // TODO:
 // - free dynamic arrays
-// - da dei file inclusi (ovviamente non esiste ancora la possibilita' di includere, ma sto facendo gia' troppi strdup in location, quindi lo salvo solo una volta in questo array e a loc metto l'indice o il puntatore)
-// - rinominare parser_expect_and_match in parser_match
+// - parser:
+//   > riguardare tutto il parser e farse funzioni piu' sensate, simili al lexer
 
 // Grammar:
 // statement  -> command ; statement | \eps
@@ -122,31 +122,67 @@ void note(char *format, ...)
     printf("NOTE: %s\n", note_buf);
 }
 
+typedef struct
+{
+    char **items;
+    size_t count;
+    size_t capacity;
+} ArrayOfCStrings;
+
+typedef struct
+{
+    String *items;
+    size_t count;
+    size_t capacity;
+} ArrayOfStrings;
+
+ArrayOfCStrings included_files = {0};
 
 typedef struct
 {
     size_t row;
     size_t col;
-    char *file_path;
+    size_t file_path;
 } Location;
+
+char *loc_get_path(Location loc)
+{
+    char *path;
+    da_get(included_files, loc.file_path, path);
+    return path;
+}
+
+int loc_get_path_index(char *file_path)
+{
+    for (size_t i = 0; i < included_files.count; i++) {
+        if (streq(file_path, included_files.items[i]))
+            return i;
+    }
+    return -1;
+}
 
 Location loc_new(char *file_path)
 {
+    int index = loc_get_path_index(file_path);
+    if (index == -1) {
+        index = included_files.count;
+        da_push(&included_files, strdup(file_path));
+    } 
     return (Location){
         .row = 0,
         .col = 0,
-        .file_path = strdup(file_path)
+        .file_path = index
     };
 }
 
-void loc_print(Location loc) { printf("%s:%zu:%zu", loc.file_path, loc.row+1, loc.col+1); }
+void loc_print(Location loc) { printf("%s:%zu:%zu", loc_get_path(loc), loc.row+1, loc.col+1); }
 
 Location loc_clone(Location loc)
 {
     return (Location){
         .row = loc.row,
         .col = loc.col,
-        .file_path = strdup(loc.file_path)
+        .file_path = loc.file_path
     };
 }
 
@@ -254,13 +290,6 @@ typedef struct
 
 typedef struct
 {
-    String *items;
-    size_t count;
-    size_t capacity;
-} ArrayOfStrings;
-
-typedef struct
-{
     ArrayOfStrings source;
     char c;
     Location loc;
@@ -341,11 +370,11 @@ bool lex_peek(Lexer *lex)
     return true;
 }
 
-bool lex_expect(Lexer *lex, char expected)
+bool lex_expect(Lexer *lex, char xpctd)
 {
     char tmp = lex->c;
     bool res = false;
-    if (lex_peek(lex) && lex->c == expected) res = true;
+    if (lex_peek(lex) && lex->c == xpctd) res = true;
     lex->c = tmp;
     return res;
 }
@@ -377,11 +406,11 @@ bool lex_expect_alphanum(Lexer *lex)
     return res;
 }
 
-bool lex_match(Lexer *lex, char expected)
+bool lex_match(Lexer *lex, char xpctd)
 {
     char tmp = lex->c;
     bool res = false;
-    if (lex_peek(lex) && lex->c == expected) {
+    if (lex_peek(lex) && lex->c == xpctd) {
         lex_advance(lex);
         res = true;
     } else {
@@ -566,24 +595,37 @@ Parser parser_new(Tokens tokens)
     };
 }
 
-bool parser_can_advance(Parser *p) { return p->i < p->tokens.count; }
+bool parser_can_advance(Parser *p) { return p->i+1 < p->tokens.count; }
+bool parser_advance(Parser *p)
+{
+    if (!parser_can_advance(p)) return false;
+    p->i++;
+    return true;
+}
 
 Token parser_get(Parser *p)
 {
-    if (parser_can_advance(p)) return p->tokens.items[p->i];
+    if (p->i < p->tokens.count) return p->tokens.items[p->i];
+    else return tok_none();
+}
+
+Token parser_peek(Parser *p)
+{
+    if (parser_can_advance(p)) return p->tokens.items[p->i+1];
     else return tok_none();
 }
 
 Token parser_next(Parser *p)
 {
-    Token t = parser_get(p);
-    p->i++;
-    return t;
+    if (parser_can_advance(p)) {
+        p->i++;
+        return parser_get(p);
+    } else return tok_none();
 }
 
-bool parser_expect(Parser *p, TokenType type) { return parser_get(p).type == type; }
+bool parser_expect(Parser *p, TokenType xpctd) { return parser_peek(p).type == xpctd; }
 
-bool parser_expect_and_match(Parser *p, TokenType type)
+bool parser_match(Parser *p, TokenType type)
 {
     if (parser_expect(p, type)) {
         p->i++;
@@ -591,21 +633,21 @@ bool parser_expect_and_match(Parser *p, TokenType type)
     } else return false;
 }
 
-void error_expected_token_type(TokenType expected, Token victim, Token from)
+void error_expected_token_type(TokenType xpctd, Token victim, Token from)
 {
     if (victim.type == TOK_NONE) {
         loc_print(from.loc);
         printf(": ");
-        errorln("expecting `%s`, but got nothing instead.", toktype_to_str(expected));
+        errorln("expecting `%s`, but got nothing instead.", toktype_to_str(xpctd));
     } else {
         loc_print(victim.loc);
         printf(": ");
-        errorln("expecting `%s`, but got `%s` instead.", toktype_to_str(expected), toktype_to_str(victim.type));
+        errorln("expecting `%s`, but got `%s` instead.", toktype_to_str(xpctd), toktype_to_str(victim.type));
     }
     exit(1);
 }
 
-void error_expected_token_types(TokenType *expected, int n, Token victim, Token from)
+void error_expected_token_types(TokenType *xpctd, int n, Token victim, Token from)
 {
     if (victim.type == TOK_NONE) {
         loc_print(from.loc);
@@ -614,7 +656,7 @@ void error_expected_token_types(TokenType *expected, int n, Token victim, Token 
         for (int i = 0; i < n; i ++) {
             if (i < n-1) printf(", ");
             else printf(" or ");
-            printf("`%s`", toktype_to_str(expected[i]));
+            printf("`%s`", toktype_to_str(xpctd[i]));
             printf(", but got nothing instead.\n");
         }
     } else {
@@ -624,11 +666,27 @@ void error_expected_token_types(TokenType *expected, int n, Token victim, Token 
         for (int i = 0; i < n; i ++) {
             if (i < n-1) printf(", ");
             else printf(" or ");
-            printf("`%s`", toktype_to_str(expected[i]));
+            printf("`%s`", toktype_to_str(xpctd[i]));
             printf(", but got `%s` instead.\n", toktype_to_str(victim.type));
         }
     }
     exit(1);
+}
+
+void parser_match_type_else_error(Parser *p, TokenType xpctd, Token victim, Token from)
+{
+    if (!parser_match(p, xpctd)) {
+        error_expected_token_type(xpctd, victim, from);
+    }
+}
+
+size_t parser_match_types_else_error(Parser *p, TokenType *xpctd, size_t n, Token victim, Token from)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (parser_match(p, xpctd[i])) return i;
+    }
+    error_expected_token_types(xpctd, n, victim, from);
+    return 0;
 }
 
 void error_undeclared_variable(Token tok, char *msg)
@@ -645,13 +703,14 @@ Ops parser_parse(Parser *parser)
     Ops ops = {0};
     Token tok;
     static_assert(OP_TYPES_COUNT == 5, "Cover all op types in parser_parse");
-    while (parser_can_advance(parser)) {
-        tok = parser_next(parser);
+    do {
+        tok = parser_get(parser);
+        if (tok.type == TOK_NONE) break;
         switch (tok.type)
         {
             case TOK_IDENT:
             {
-                if (parser_expect_and_match(parser , TOK_L_PAREN)) {
+                if (parser_match(parser , TOK_L_PAREN)) {
                     // TODO: parse args (every arg is an expr)
                     if (parser_expect(parser, TOK_INTEGER)) {
                         Token t_val = parser_next(parser);
@@ -675,12 +734,8 @@ Ops parser_parse(Parser *parser)
                         TokenType types[2] = {TOK_INTEGER, TOK_IDENT};
                         error_expected_token_types(types, 2, parser_get(parser), tok);
                     }
-                    if (!parser_expect_and_match(parser, TOK_R_PAREN)) {
-                        error_expected_token_type(TOK_R_PAREN, parser_get(parser), tok);
-                    }
-                    if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
-                        error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
-                    }
+                    parser_match_type_else_error(parser, TOK_R_PAREN, parser_get(parser), tok);
+                    parser_match_type_else_error(parser, TOK_SEMICOLON, parser_get(parser), tok);
                     if (streq(tok.text, "print")) {
                         Op op = { .type = OP_PRINT };
                         da_push(&ops, op);
@@ -697,12 +752,8 @@ Ops parser_parse(Parser *parser)
                     parser_next(parser);
                     //da_push_many(op, parser_parse_expr(parser)); // TODO
                     Token t_val = parser_get(parser);
-                    if (!parser_expect_and_match(parser, TOK_INTEGER)) {
-                        error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
-                    }
-                    if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
-                        error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
-                    }
+                    parser_match_type_else_error(parser, TOK_INTEGER, parser_get(parser), tok);
+                    parser_match_type_else_error(parser, TOK_SEMICOLON, parser_get(parser), tok);
                     Op op = { .type = OP_LOAD16, .val_uint = atoi(t_val.text) }; // TODO: check for atoi corectness
                     da_push(&ops, op);
                     op = (Op){ .type = OP_GLOB_VAR_ASSIGN, .val_uint = var_i };
@@ -715,9 +766,7 @@ Ops parser_parse(Parser *parser)
             case TOK_VAR:
             {
                 Token t_var_name = parser_get(parser);
-                if (!parser_expect_and_match(parser, TOK_IDENT)) {
-                    error_expected_token_type(TOK_IDENT, parser_get(parser), tok);
-                }
+                parser_match_type_else_error(parser, TOK_IDENT, parser_get(parser), tok);
                 int var_i;
                 if ((var_i = global_var_index_by_name(t_var_name.text)) != -1) {
                     GlobVar var = global_vars.items[var_i]; 
@@ -738,15 +787,12 @@ Ops parser_parse(Parser *parser)
                 };
                 global_vars_total_offset += size_of_type(var.type);
                 da_push(&global_vars, var);
-                if (parser_expect_and_match(parser, TOK_SEMICOLON)) break;
-                else if (parser_expect_and_match(parser, TOK_OP_ASSIGN)) {
-                    if (!parser_expect(parser, TOK_INTEGER)) { // TODO: per ora
-                        error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
-                    }
+                if (parser_match(parser, TOK_SEMICOLON)) break;
+                else if (parser_match(parser, TOK_OP_ASSIGN)) {
+                    parser_match_type_else_error(parser, TOK_INTEGER, parser_get(parser), tok); // TODO: per ora
                     Token t_val = parser_next(parser); // TODO: che ci faccio con questo? Lo devo salvare in rax cosi' poi da metterlo nella variabile? Mi sfugge questa cosa.
-                    if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
-                        error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
-                    }
+                    tok_print(t_val);
+                    parser_match_type_else_error(parser, TOK_SEMICOLON, parser_get(parser), t_val);
                     Op op = {
                         .type = OP_LOAD16,
                         .val_uint = atoi(t_val.text) // TODO: solo per ora, poi non sara' cosi'
@@ -766,13 +812,11 @@ Ops parser_parse(Parser *parser)
             {
                 Token t_condition = parser_get(parser);
                 (void)t_condition;
-                if (!(parser_expect_and_match(parser, TOK_TRUE) || parser_expect_and_match(parser, TOK_FALSE))) {
+                if (!(parser_match(parser, TOK_TRUE) || parser_match(parser, TOK_FALSE))) {
                     todo("parse if condition");
                     exit(1);
                 }
-                if (!parser_expect_and_match(parser, TOK_L_CUPAREN)) {
-                    error_expected_token_type(TOK_L_CUPAREN, parser_get(parser), tok);
-                }
+                parser_match_type_else_error(parser, TOK_L_CUPAREN, parser_get(parser), tok);
                 // TODO: parse if body (segnare da qualche parte, in uno stack magari, che si e' aperto un if/blocco e che si si aspetta venga chiuso ad un certo punto)
                 // TODO: pensare all'op per if
             } break;
@@ -785,7 +829,7 @@ Ops parser_parse(Parser *parser)
                 todo("parse token type %s", toktype_to_str(tok.type));
                 exit(1);
         }
-    }
+    } while (parser_advance(parser));
     return ops;
 }
 

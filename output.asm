@@ -38,10 +38,14 @@ entry start
 start:
     push rbp
     mov rbp, rsp
-    sub rsp, 4
+    sub rsp, 8
     mov rax, [rbp-0]
     mov rdi, rax
     call print
+    mov rax, 69
+    mov [rbp-0], rax
+    mov rax, 0
+    mov [rbp-1], rax
     mov rsp, rbp
     pop rbp
     mov rax, 60
