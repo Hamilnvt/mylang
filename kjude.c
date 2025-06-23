@@ -1,5 +1,17 @@
 // TODO:
 // - free dynamic arrays
+// - da dei file inclusi (ovviamente non esiste ancora la possibilita' di includere, ma sto facendo gia' troppi strdup in location, quindi lo salvo solo una volta in questo array e a loc metto l'indice o il puntatore)
+// - rinominare parser_expect_and_match in parser_match
+
+// Grammar:
+// statement  -> command ; statement | \eps
+// command    -> var_decl | var_assign | f_call
+// var_decl   -> "var" ident ( "=" expr )?
+// var_assign -> ident "=" expr
+// f_call     -> ident "(" f_args ")"
+// expr       -> ident | int_lit | f_call | binop_expr
+// binop_expr -> expr binop expr
+// binop      -> "+"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,13 +178,27 @@ bool read_entire_file(const char *path, String *source)
     return true;
 }
 
+// Keywords
+#define KW_VAR   "var"
+#define KW_IF    "if"
+#define KW_TRUE  "true"
+#define KW_FALSE "false"
+
 typedef enum
 {
     TOK_NONE,
-    TOK_WORD,
+    TOK_IDENT,
+    TOK_VAR,
+    TOK_IF,
+    TOK_TRUE,
+    TOK_FALSE,
     TOK_INTEGER,
     TOK_L_PAREN,
     TOK_R_PAREN,
+    TOK_L_SQPAREN,
+    TOK_R_SQPAREN,
+    TOK_L_CUPAREN,
+    TOK_R_CUPAREN,
     TOK_SEMICOLON,
     TOK_OP_ASSIGN,
     TOK_OP_PLUS,
@@ -181,13 +207,21 @@ typedef enum
 
 char *toktype_to_str(TokenType t)
 {
-    static_assert(TOK_TYPES_COUNT == 8 && "Cover all token types in toktype_to_str");
+    static_assert(TOK_TYPES_COUNT == 16 && "Cover all token types in toktype_to_str");
     switch (t)
     {
-        case TOK_WORD:      return "Word";
+        case TOK_IDENT:     return "Ident";
+        case TOK_VAR:       return "Var";
+        case TOK_IF:        return "If";
+        case TOK_TRUE:      return "True";
+        case TOK_FALSE:     return "False";
         case TOK_INTEGER:   return "Integer";
         case TOK_L_PAREN:   return "Lparen";
         case TOK_R_PAREN:   return "Rparen";
+        case TOK_L_SQPAREN: return "Lsqparen";
+        case TOK_R_SQPAREN: return "Rsqparen";
+        case TOK_L_CUPAREN: return "Lcuparen";
+        case TOK_R_CUPAREN: return "Rcuparen";
         case TOK_SEMICOLON: return "Semicolon";
         case TOK_OP_ASSIGN: return "OpAssign";
         case TOK_OP_PLUS:   return "OpPlus";
@@ -343,7 +377,7 @@ bool lex_expect_alphanum(Lexer *lex)
     return res;
 }
 
-bool lex_expect_and_advance(Lexer *lex, char expected)
+bool lex_match(Lexer *lex, char expected)
 {
     char tmp = lex->c;
     bool res = false;
@@ -357,9 +391,24 @@ bool lex_expect_and_advance(Lexer *lex, char expected)
     return res;
 }
 
+// TODO: non sembra funzionare, ma forse non serve
+bool lex_match_sequence(Lexer *lex, char *needle)
+{
+    printf("Siamo dentro\n");
+    Location saved_loc = loc_clone(lex->loc);
+    size_t len = strlen(needle);
+    for (size_t i = 0; i < len; i++) {
+        if (!lex_match(lex, needle[i])) {
+            lex->loc = saved_loc;
+            return false;
+        }
+    }
+    return true;
+}
+
 Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
 {
-    static_assert(TOK_TYPES_COUNT == 8, "Cover all token types in lex_lex");
+    static_assert(TOK_TYPES_COUNT == 16, "Cover all token types in lex_lex");
     Tokens tokens = {0};
     if (lex_is_empty(lex)) return tokens;
     String word = s_new_empty();
@@ -378,6 +427,10 @@ Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
         } else if (c == '+') { token.text = "+"; token.type = TOK_OP_PLUS;
         } else if (c == '(') { token.text = "("; token.type = TOK_L_PAREN;
         } else if (c == ')') { token.text = ")"; token.type = TOK_R_PAREN;
+        } else if (c == '[') { token.text = "["; token.type = TOK_L_SQPAREN;
+        } else if (c == ']') { token.text = "]"; token.type = TOK_R_SQPAREN;
+        } else if (c == '{') { token.text = "{"; token.type = TOK_L_CUPAREN;
+        } else if (c == '}') { token.text = "}"; token.type = TOK_R_CUPAREN;
         } else if (c == ';') { token.text = ";"; token.type = TOK_SEMICOLON;
         } else if (c == '/') {
             if (lex_expect(lex, '/')) {
@@ -413,7 +466,11 @@ Tokens lex_lex(Lexer *lex) // NOTE: assuming that it is correctly initialized
             token.text = strdup(word.items);
             s_clear(&word);
 
-            token.type = TOK_WORD;
+            if      (streq(token.text, KW_VAR))   token.type = TOK_VAR; 
+            else if (streq(token.text, KW_IF))    token.type = TOK_IF; 
+            else if (streq(token.text, KW_TRUE))  token.type = TOK_TRUE; 
+            else if (streq(token.text, KW_FALSE)) token.type = TOK_FALSE; 
+            else                                  token.type = TOK_IDENT;
         } else {
             todo("lex '%c'", c);
             exit(1);
@@ -586,39 +643,36 @@ void error_undeclared_variable(Token tok, char *msg)
 Ops parser_parse(Parser *parser)
 {
     Ops ops = {0};
-    Op op;
     Token tok;
     static_assert(OP_TYPES_COUNT == 5, "Cover all op types in parser_parse");
     while (parser_can_advance(parser)) {
         tok = parser_next(parser);
         switch (tok.type)
         {
-            case TOK_WORD:
+            case TOK_IDENT:
             {
-                if (streq(tok.text, "print")) {
-                    if (!parser_expect_and_match(parser, TOK_L_PAREN)) {
-                        error_expected_token_type(TOK_L_PAREN, parser_get(parser), tok);
-                    }
-                    // TODO: parse expression
+                if (parser_expect_and_match(parser , TOK_L_PAREN)) {
+                    // TODO: parse args (every arg is an expr)
                     if (parser_expect(parser, TOK_INTEGER)) {
                         Token t_val = parser_next(parser);
-                        op = (Op){
+                        Op op = {
                             .type = OP_LOAD16,
                             .val_uint = atoi(t_val.text)
                         };
-                    } else if (parser_expect(parser, TOK_WORD)) {
+                        da_push(&ops, op);
+                    } else if (parser_expect(parser, TOK_IDENT)) {
                         Token t_var = parser_next(parser);
                         int var_i;
                         if ((var_i = global_var_index_by_name(t_var.text)) == -1) {
                             error_undeclared_variable(tok, "");
                         }
-                        op = (Op){
+                        Op op = {
                             .type = OP_READ_GLOB_VAR,
                             .val_uint = var_i
                         };
                         da_push(&ops, op);
                     } else {
-                        TokenType types[2] = {TOK_INTEGER, TOK_WORD};
+                        TokenType types[2] = {TOK_INTEGER, TOK_IDENT};
                         error_expected_token_types(types, 2, parser_get(parser), tok);
                     }
                     if (!parser_expect_and_match(parser, TOK_R_PAREN)) {
@@ -627,56 +681,14 @@ Ops parser_parse(Parser *parser)
                     if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
                         error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
                     }
-                    op = (Op){ .type = OP_PRINT };
-                    da_push(&ops, op);
-                } else if (streq(tok.text, "var")) {
-                    Token t_var_name = parser_get(parser);
-                    if (!parser_expect_and_match(parser, TOK_WORD)) {
-                        error_expected_token_type(TOK_WORD, parser_get(parser), tok);
-                    }
-                    int var_i;
-                    if ((var_i = global_var_index_by_name(t_var_name.text)) != -1) {
-                        GlobVar var = global_vars.items[var_i]; 
-                        loc_print(tok.loc);
-                        printf(": ");
-                        errorln("Redeclaration of variable `%s`.", var.name);
-                        loc_print(var.loc);
-                        printf(": ");
-                        note(" Declared here the first time.");
-                        exit(1);
-                    }
-                    var_i = global_vars.count;
-                    GlobVar var = (GlobVar){
-                        .type = TYPE_INT,
-                        .offset = global_vars_total_offset,
-                        .name = strdup(t_var_name.text),
-                        .loc = loc_clone(tok.loc)
-                    };
-                    global_vars_total_offset += size_of_type(var.type);
-                    da_push(&global_vars, var);
-                    if (parser_expect_and_match(parser, TOK_SEMICOLON)) break;
-                    else if (parser_expect_and_match(parser, TOK_OP_ASSIGN)) {
-                        if (!parser_expect(parser, TOK_INTEGER)) { // TODO: per ora
-                            error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
-                        }
-                        Token t_val = parser_next(parser); // TODO: che ci faccio con questo? Lo devo salvare in rax cosi' poi da metterlo nella variabile
-                        if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
-                            error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
-                        }
-                        op = (Op){
-                            .type = OP_LOAD16,
-                            .val_uint = atoi(t_val.text) // TODO: solo per ora, poi non sara' cosi'
-                        };
-                        da_push(&ops, op);
-                        op = (Op){
-                            .type = OP_GLOB_VAR_ASSIGN,
-                            .val_uint = var_i
-                        };
+                    if (streq(tok.text, "print")) {
+                        Op op = { .type = OP_PRINT };
                         da_push(&ops, op);
                     } else {
-                        TokenType types[2] = {TOK_SEMICOLON, TOK_OP_ASSIGN};
-                        error_expected_token_types(types, 2, parser_get(parser), tok);
+                        todo("functions are not yet supported");
+                        exit(1);
                     }
+                    break;
                 } else if (parser_expect(parser, TOK_OP_ASSIGN)) {
                     int var_i;
                     if ((var_i = global_var_index_by_name(tok.text)) == -1) {
@@ -691,23 +703,86 @@ Ops parser_parse(Parser *parser)
                     if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
                         error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
                     }
-                    op = (Op){ .type = OP_LOAD16, .val_uint = atoi(t_val.text) };
+                    Op op = { .type = OP_LOAD16, .val_uint = atoi(t_val.text) }; // TODO: check for atoi corectness
                     da_push(&ops, op);
                     op = (Op){ .type = OP_GLOB_VAR_ASSIGN, .val_uint = var_i };
                     da_push(&ops, op);
                 } else {
-                    errorln("unknown WORD `%s`", tok.text);
+                    errorln("unknown word `%s`", tok.text);
                     exit(1);
                 }
-                break;
-            }     
+            } break;  
+            case TOK_VAR:
+            {
+                Token t_var_name = parser_get(parser);
+                if (!parser_expect_and_match(parser, TOK_IDENT)) {
+                    error_expected_token_type(TOK_IDENT, parser_get(parser), tok);
+                }
+                int var_i;
+                if ((var_i = global_var_index_by_name(t_var_name.text)) != -1) {
+                    GlobVar var = global_vars.items[var_i]; 
+                    loc_print(tok.loc);
+                    printf(": ");
+                    errorln("Redeclaration of variable `%s`.", var.name);
+                    loc_print(var.loc);
+                    printf(": ");
+                    note(" Declared here the first time.");
+                    exit(1);
+                }
+                var_i = global_vars.count;
+                GlobVar var = (GlobVar){
+                    .type = TYPE_INT,
+                    .offset = global_vars_total_offset,
+                    .name = strdup(t_var_name.text),
+                    .loc = loc_clone(tok.loc)
+                };
+                global_vars_total_offset += size_of_type(var.type);
+                da_push(&global_vars, var);
+                if (parser_expect_and_match(parser, TOK_SEMICOLON)) break;
+                else if (parser_expect_and_match(parser, TOK_OP_ASSIGN)) {
+                    if (!parser_expect(parser, TOK_INTEGER)) { // TODO: per ora
+                        error_expected_token_type(TOK_INTEGER, parser_get(parser), tok);
+                    }
+                    Token t_val = parser_next(parser); // TODO: che ci faccio con questo? Lo devo salvare in rax cosi' poi da metterlo nella variabile? Mi sfugge questa cosa.
+                    if (!parser_expect_and_match(parser, TOK_SEMICOLON)) {
+                        error_expected_token_type(TOK_SEMICOLON, parser_get(parser), tok);
+                    }
+                    Op op = {
+                        .type = OP_LOAD16,
+                        .val_uint = atoi(t_val.text) // TODO: solo per ora, poi non sara' cosi'
+                    };
+                    da_push(&ops, op);
+                    op = (Op){
+                        .type = OP_GLOB_VAR_ASSIGN,
+                        .val_uint = var_i
+                    };
+                    da_push(&ops, op);
+                } else {
+                    TokenType types[2] = {TOK_SEMICOLON, TOK_OP_ASSIGN};
+                    error_expected_token_types(types, 2, parser_get(parser), tok);
+                }
+            } break;
+            case TOK_IF:
+            {
+                Token t_condition = parser_get(parser);
+                (void)t_condition;
+                if (!(parser_expect_and_match(parser, TOK_TRUE) || parser_expect_and_match(parser, TOK_FALSE))) {
+                    todo("parse if condition");
+                    exit(1);
+                }
+                if (!parser_expect_and_match(parser, TOK_L_CUPAREN)) {
+                    error_expected_token_type(TOK_L_CUPAREN, parser_get(parser), tok);
+                }
+                // TODO: parse if body (segnare da qualche parte, in uno stack magari, che si e' aperto un if/blocco e che si si aspetta venga chiuso ad un certo punto)
+                // TODO: pensare all'op per if
+            } break;
             case TOK_NONE:
             {
                 fprintf(stderr, "Unreachable\n");
                 exit(1);
             }
             default: 
-                todo("parse token type %s.", toktype_to_str(tok.type));
+                todo("parse token type %s", toktype_to_str(tok.type));
                 exit(1);
         }
     }

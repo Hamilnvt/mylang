@@ -1,2 +1,10 @@
-var a = 0;
+var a;
 print(a);
+a = 69;
+
+var b = 7;
+if true {
+    print(b);
+} else {
+    print(420);
+}
